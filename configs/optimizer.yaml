@@ -1,0 +1,82 @@
+# Classical optimisation of the HVA parameters via BP-PPS gradients.
+optimizer:
+  # Stage 1: Adam for the initial descent.
+  stage1:
+    name: "Adam"
+    learning_rate: 0.01
+    epochs: 200
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1.0e-8
+  # Stage 2: L-BFGS-B refinement. BP-PPS gives exact analytic gradients, so a
+  # quasi-Newton polish is cheap and recovers the last digits Adam leaves.
+  stage2:
+    enabled: true
+    name: "L-BFGS-B"
+    max_iter: 200
+    tolerance_grad: 1.0e-6
+
+  # Ground-state preparation runs the same machinery with a different loss.
+  ground_state:
+    learning_rate: 0.05
+    epochs: 100
+    # Product state the prepared circuit starts from: "plus" = |+...+>,
+    # "zero" = |0...0>.
+    #
+    # Use "plus". Pi_i X_i commutes with H and with every HVA gate (RX, RZZ),
+    # so the circuit cannot move weight between the two parity sectors. The
+    # ground state always sits in the +1 sector - H is stoquastic, so
+    # Perron-Frobenius makes its amplitudes positive and Pi X, a permutation of
+    # them, cannot return -psi0 - and |+...+> is a +1 eigenstate at any size.
+    # |0...0> is not a parity eigenstate (Pi X |0...0> = |1...1>), so it splits
+    # evenly across both sectors and caps the ground-state fidelity at 0.5 no
+    # matter how many layers are used. Measured at 4x4, 3 layers: |<E0|psi>|^2
+    # = 0.0766 with |<E1|psi>|^2 = 0.0665 beside it, exactly the even split.
+    # |+...+> costs one layer of H and no two-qubit gates, and is also the
+    # standard adiabatic starting point, which makes the depth comparison
+    # against a Trotterised adiabatic schedule a like-for-like one.
+    initial_state: plus
+
+  # Parameter initialisation.
+  #   trotter_warm_start: seed theta from a 1st-order Trotter circuit of the
+  #     same depth. The BP-PPS paper reports that random initialisation only
+  #     converges for 2-3 layers; deeper circuits need this.
+  #   random_scale: half-width of the uniform fallback initialiser.
+  init:
+    trotter_warm_start: true
+    random_scale: 0.1
+    seed: 42
+
+truncation:
+  # Coefficient threshold delta for the training-time SPD propagation.
+  initial_delta: 1.0e-3
+  # 1e-7, not the earlier 1e-5: the ground-state run needs room to keep
+  # tightening. See docs/issues/01-scale-plan.md, "적응적 절단이 작동하지
+  # 않았습니다" -- the old floor was never reached anyway because the
+  # tightening criterion never fired.
+  min_delta: 1.0e-7
+  adaptive: true
+  # Tighten delta by `factor` whenever the tracked truncation-error estimate
+  # (BP-PPS Appendix B, Eq. B16) exceeds `error_ratio` x a mode-dependent
+  # scale, i.e. whenever the reported loss is no longer trustworthy at its own
+  # scale. Time evolution compares against sqrt(L_{X,Z}); the ground state
+  # compares against the energy decrease over the last `patience` epochs, since
+  # |E| is set by lattice size rather than by convergence and gives a threshold
+  # that never trips. See BPPPSTrainer.error_scale.
+  factor: 0.1
+  error_ratio: 0.1
+  # Minimum epochs between two tightenings, so Adam can re-equilibrate.
+  patience: 10
+  # Which propagation engine the gradient steps run on.
+  #   string  Dict[str, float], src/bppps/propagation.py. The oracle every
+  #           other engine is validated against (TESTs 10-21).
+  #   sorted  whole-array uint64 keys, src/bppps/propagation_sorted.py.
+  # Measured on the real 4x4 problem at delta=1e-6 with the production L=3
+  # angles: time evolution 95.9 s -> 6.0 s per gradient (15.9x) with the loss
+  # agreeing to 8.0e-13 relative, ground state 57.7 s -> 4.0 s (14.5x) with
+  # the energy agreeing to 1.0e-15. Same numbers, not an approximation.
+  #
+  # Limit to know before reusing this at 7x7: the sorted key packs x into the
+  # low 32 bits and z into the high 32, so it holds at most 32 qubits. 4x4 and
+  # 5x5 fit; 7x7 (49) does not and needs the key widened first.
+  engine: sorted
